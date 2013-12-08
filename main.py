@@ -20,6 +20,14 @@ def initlog(lv, logfile=None):
     rootlog.setLevel(lv)
 
 def main():
+    '''
+durain [-a accessfile] [-l loglevel] [-h] [-p port]
+options:
+* -a: accessfile
+* -l: loglevel, DEBUG, INFO, WARNING, ERROR
+* -h: show help
+* -p: port
+    '''
     optlist, args = getopt.getopt(sys.argv[1:], 'a:l:hp:')
     optdict = dict(optlist)
     if '-h' in optdict:
@@ -28,9 +36,7 @@ def main():
 
     import proxy
     initlog(optdict.get('-l', 'WARNING'))
-    p = proxy.Proxy(
-        accesslog='')
-        # accesslog=optdict.get('-a', 'access.log'))
+    p = proxy.Proxy(accesslog=optdict.get('-a'))
     p.application = __import__('manager').setup(p)
 
     try:

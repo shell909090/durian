@@ -124,6 +124,7 @@ class Proxy(object):
         env['CONTENT_TYPE'] = req.get_header('Content-Type')
         env['CONTENT_LENGTH'] = req.get_header('Content-Length')
         env['SERVER_PROTOCOL'] = req.version
+        # TODO: wsgi.input
         return env
 
     def do_service(self, req):
