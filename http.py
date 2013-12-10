@@ -136,15 +136,6 @@ class HttpMessage(object):
                 self.add_header(h.strip(), v.strip())
             else: self.add_header(h.strip(), line.strip())
 
-    def isclose(self, hasbody=False):
-        if self.get_header('Transfer-Encoding', 'identity') == 'identity' and \
-           not self.has_header('Content-Length') and hasbody:
-            return True
-        if self.version.upper() == 'HTTP/1.1':
-            return self.get_header('Connection', '').lower() == 'close'
-        if self.get_header('Keep-Alive'): return False
-        return self.get_header('Connection', '').lower() != 'keep-alive'
-
     def read_chunk(self, stream, hasbody=False):
         if self.get_header('Transfer-Encoding', 'identity') != 'identity':
             logger.debug('recv body on chunk mode')
@@ -242,7 +233,7 @@ class Response(HttpMessage):
     def __init__(self, version, code, phrase):
         HttpMessage.__init__(self)
         self.version, self.code, self.phrase = version, int(code), phrase
-        self.connection, self.cache = False, 0
+        self.connection, self.cache = True, 0
 
     def __nonzero__(self): return self.connection
 

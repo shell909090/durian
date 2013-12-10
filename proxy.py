@@ -50,12 +50,19 @@ class Connector(object):
 
 connector = Connector()
 
+class Meter(object):
+
+    def __init__(self, src, init=0):
+        self.counter, self.src = init, src
+
+    def __iter__(self):
+        for c in self.src:
+            self.counter += len(c)
+            yield c
+
 class Proxy(object):
-    VERBOSE = False
-    # Actually, 'Transfer-Encoding' should included.
-    hopHeaders = [
-        'Connection', 'Keep-Alive', 'Proxy-Authenticate', 'Proxy-Authorization',
-        'Te', 'Trailers', 'Upgrade']
+    VERBOSE = True
+    hopHeaders = ['Connection', 'Keep-Alive', 'Te', 'Trailers', 'Upgrade']
 
     def __init__(self, application=None, accesslog=None):
         self.plugins, self.in_query = [], []
@@ -69,11 +76,12 @@ class Proxy(object):
     def accesslog(self, addr, req, res):
         if self.accesslogfile is None: return
         if res is not None:
-            if hasattr(res, 'length'):
-                length = res.length
-            else: length = res.get_header('Content-Length', '-')
             code = res.code
-        else: length, code = '-', 500
+            length = res.get_header('Content-Length')
+            if length is None and hasattr(res, 'length'):
+                length = str(res.length)
+            if length is None: length = '-'
+        else: code, length = 500, '-'
         self.accesslogfile.write('%s:%d - - [%s] "%s" %d %s "-" %s\n' % (
             addr[0], addr[1], datetime.now().isoformat(),
             req.get_startline(), code, length, req.get_header('User-Agent')))
@@ -104,24 +112,47 @@ class Proxy(object):
 
     def clone_msg(self, msg):
         msgx = copy.copy(msg)
+        msgx.headers = msg.headers.copy()
+        for k, v in msg.headers.iteritems():
+            if k.startswith('Proxy-'): msgx.del_header(k)
         for k in self.hopHeaders:
             if msgx.has_header(k): msgx.del_header(k)
         return msgx
 
-    def forward_msg(self, msg, stream, msgx, streamx, hasbody=False):
-        if self.VERBOSE: msgx.debug()
-        msgx.send_header(streamx)
-        source = msg.read_chunk(stream, hasbody=hasbody)
-        if msg.get_header('Transfer-Encoding', 'identity') != 'identity':
-            source = http.chunked(source)
-        msg.length = 0
-        # FIXME: wrong! chunk size counted.
-        for c in source:
-            # TODO: cache?
-            # self.do_plugins('data', msg, c)
-            msg.length += len(c)
-            streamx.write(c)
-        streamx.flush()
+    def round_trip(self, reqx, keepalive):
+        sock = connector.connect(reqx.addr)
+        if sock is None:
+            res = http.response_to(reqx, 502)
+            return res
+        streamx = sock.makefile()
+
+        try:
+            # TODO: persistent connection
+            reqx.add_header('Connection', 'close')
+            if self.VERBOSE: reqx.debug()
+            reqx.sendto(streamx)
+
+            resx = http.Response.recv_msg(streamx)
+            if self.VERBOSE: resx.debug()
+
+            hasbody = reqx.method.upper() != 'HEAD' and resx.code not in http.CODE_NOBODY
+
+            res = self.clone_msg(resx)
+            m = Meter(resx.read_chunk(streamx, hasbody))
+            res.body = m
+            if resx.get_header('Transfer-Encoding', 'identity') != 'identity':
+                res.body = http.chunked(res.body)
+            res.connection = keepalive
+            res.set_header('Connection', 'keep-alive' if keepalive else 'close')
+
+            if self.VERBOSE: res.debug()
+            res.sendto(reqx.stream)
+            res.length = m.counter
+
+        finally:
+            connector.close(sock)
+
+        return res
 
     def do_http(self, req, addr):
         host, port, uri = http.parseurl(req.uri)
@@ -129,41 +160,30 @@ class Proxy(object):
         if self.VERBOSE: req.debug()
         reqx = self.clone_msg(req)
         reqx.uri = uri
+        reqx.addr = (host, port)
+        reqx.body = req.read_chunk(req.stream)
+        if req.get_header('Transfer-Encoding', 'identity') != 'identity':
+            reqx.body = http.chunked(reqx.body)
 
-        sock = connector.connect((host, port))
-        if sock is None:
-            res = http.response_to(req, 502)
-            self.accesslog(addr, req, res)
-            return
-        stream = sock.makefile()
+        # FIXME:
+        keepalive = False
+        # if req.has_header('Proxy-Connection'):
+        #     req.add_header('Connection', req.get_header('Proxy-Connection'))
+        # if req.version.upper() == 'HTTP/1.1':
+        #     keepalive = req.get_header('Connection', '').lower() != 'close'
+        # elif self.get_header('Keep-Alive'): keepalive = True
+        # else: keepalive = req.get_header('Connection', '').lower() == 'keep-alive'
 
         res = None
         req.start_time = datetime.now()
         self.in_query.append(req)
 
         try:
-            # TODO: persistent connection
-            reqx.add_header('Connection', 'close')
-            self.forward_msg(req, req.stream, reqx, stream)
-
-            res = http.Response.recv_msg(stream)
-            if self.VERBOSE: res.debug()
-
-            resx = self.clone_msg(res)
-            hasbody = req.method.upper() != 'HEAD' and res.code not in http.CODE_NOBODY
-            self.forward_msg(res, stream, resx, req.stream, hasbody)
-
-        except Exception, err:
-            if res is None:
-                res = http.response_to(req, 502)
-            self.accesslog(addr, req, res)
-            raise
+            res = self.round_trip(reqx, keepalive)
 
         finally:
             self.in_query.remove(req)
-            connector.close(sock)
 
-        res.connection = not res.isclose(hasbody)
         self.accesslog(addr, req, res)
         return res
 
@@ -199,10 +219,10 @@ class Proxy(object):
         try:
             for b in http.chunked(self.application(env, start_response)):
                 req.stream.write(b)
+            req.stream.flush()
         except Exception, err:
             if not res.header_sent:
                 res.send_header(req.stream)
-                req.stream.flush()
             self.accesslog(addr, req, res)
             raise
 
