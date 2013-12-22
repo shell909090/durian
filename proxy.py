@@ -142,6 +142,11 @@ class Proxy(object):
             res.body = m
             if resx.get_header('Transfer-Encoding', 'identity') != 'identity':
                 res.body = http.chunked(res.body)
+
+            if all((resx.get_header('Transfer-Encoding', 'identity') == 'identity',
+                    not resx.has_header('Content-Length'), hasbody)):
+                keepalive = False
+
             res.connection = keepalive
             res.set_header('Connection', 'keep-alive' if keepalive else 'close')
 
@@ -164,15 +169,18 @@ class Proxy(object):
         reqx.body = req.read_chunk(req.stream)
         if req.get_header('Transfer-Encoding', 'identity') != 'identity':
             reqx.body = http.chunked(reqx.body)
+        reqx.set_header('Host', host)
 
-        # FIXME:
-        keepalive = False
-        # if req.has_header('Proxy-Connection'):
-        #     req.add_header('Connection', req.get_header('Proxy-Connection'))
-        # if req.version.upper() == 'HTTP/1.1':
-        #     keepalive = req.get_header('Connection', '').lower() != 'close'
-        # elif self.get_header('Keep-Alive'): keepalive = True
-        # else: keepalive = req.get_header('Connection', '').lower() == 'keep-alive'
+        # keepalive = False
+        if req.version == 'HTTP/1.1':
+            keepalive = not any((
+                req.get_header('Connection', '').lower() == 'close',
+                req.get_header('Proxy-Connection', '').lower() == 'close'))
+        else:
+            keepalive = any((
+                req.get_header('Connection', '').lower() == 'keep-alive',
+                req.get_header('Proxy-Connection', '').lower() == 'keep-alive',
+                req.has_header('Keep-Alive')))
 
         res = None
         req.start_time = datetime.now()
@@ -225,7 +233,6 @@ class Proxy(object):
                 res.send_header(req.stream)
             self.accesslog(addr, req, res)
             raise
-
 
         self.accesslog(addr, req, res)
         return res
