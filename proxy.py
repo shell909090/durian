@@ -21,20 +21,6 @@ def fdcopy(fd1, fd2):
             try: os.write(fd2 if rfd == fd1 else fd1, d)
             except OSError: raise EOFError()
 
-class RequestFile(object):
-
-    def __init__(self, req):
-        self.it, self.buf = req.read_chunk(req.stream), ''
-
-    def read(self, size):
-        try:
-            while len(self.buf) < size:
-                self.buf += self.it.next()
-        except StopIteration:
-            size = len(self.buf)
-        r, self.buf = self.buf[:size], self.buf[size:]
-        return r
-
 class Connector(object):
 
     def connect(self, addr):
@@ -60,33 +46,28 @@ class Meter(object):
             self.counter += len(c)
             yield c
 
-class Proxy(object):
+class Proxy(http.WSGIServer):
     VERBOSE = True
     hopHeaders = ['Connection', 'Keep-Alive', 'Te', 'Trailers', 'Upgrade']
 
     def __init__(self, application=None, accesslog=None):
+        super(Proxy, self).__init__(application, accesslog)
         self.plugins, self.in_query = [], []
-        self.application = application
-        if accesslog is None:
-            self.accesslogfile = None
-        elif accesslog == '':
-            self.accesslogfile = sys.stdout
-        else: self.accesslogfile = open(accesslog, 'w')
 
-    def accesslog(self, addr, req, res):
-        if self.accesslogfile is None: return
+    def http_handler(self, req):
+        res = self.do_plugins('pre', req)
         if res is not None:
-            code = res.code
-            length = res.get_header('Content-Length')
-            if length is None and hasattr(res, 'length'):
-                length = str(res.length)
-            if length is None: length = '-'
-        else: code, length = 500, '-'
-        self.accesslogfile.write('%s:%d - - [%s] "%s" %d %s "-" %s\n' % (
-            addr[0], addr[1], datetime.now().isoformat(),
-            req.get_startline(), code, length, req.get_header('User-Agent')))
+            self.accesslog(addr, req, res)
+            return
+        if req.method.upper() == 'CONNECT':
+            return self.connect_handler(req)
+        u = urlparse.urlparse(req.uri)
+        if not u.netloc:
+            return http.WSGIServer.http_handler(self, req)
+        res = self.do_http(req)
+        return res
 
-    def do_connect(self, req, addr):
+    def connect_handler(self, req):
         r = req.uri.split(':', 1)
         host = r[0]
         port = int(r[1]) if len(r) > 1 else 80
@@ -94,7 +75,7 @@ class Proxy(object):
         sock = connector.connect((host, port))
         if sock is None:
             res = http.response_to(req, 502)
-            self.accesslog(addr, req, res)
+            self.record_access(req, res, req.addr)
             return
 
         res = None
@@ -103,7 +84,7 @@ class Proxy(object):
 
         try:
             res = http.response_to(req, 200)
-            self.accesslog(addr, req, res)
+            self.record_access(req, res, req.addr)
             fdcopy(req.stream.fileno(), sock.fileno())
 
         finally:
@@ -159,7 +140,7 @@ class Proxy(object):
 
         return res
 
-    def do_http(self, req, addr):
+    def do_http(self, req):
         host, port, uri = http.parseurl(req.uri)
 
         if self.VERBOSE: req.debug()
@@ -192,49 +173,6 @@ class Proxy(object):
         finally:
             self.in_query.remove(req)
 
-        self.accesslog(addr, req, res)
-        return res
-
-    def req2env(self, req):
-        u = urlparse.urlparse(req.uri)
-        env = dict(('HTTP_' + k.upper(), v) for k, v in req.iter_headers())
-        env['REQUEST_METHOD'] = req.method
-        env['SCRIPT_NAME'] = ''
-        env['PATH_INFO'] = u.path
-        env['QUERY_STRING'] = u.query
-        env['CONTENT_TYPE'] = req.get_header('Content-Type')
-        env['CONTENT_LENGTH'] = req.get_header('Content-Length')
-        env['SERVER_PROTOCOL'] = req.version
-        if req.method in set(['POST', 'PUT']):
-            env['wsgi.input'] = RequestFile(req)
-        return env
-
-    def do_service(self, req, addr):
-        env = self.req2env(req)
-
-        res = http.response_http(500)
-        res.header_sent = False
-        def start_response(status, res_headers):
-            r = status.split(' ', 1)
-            res.code = int(r[0])
-            if len(r) > 1: res.phrase = r[1]
-            else: res.phrase = http.DEFAULT_PAGES[resp.code][0]
-            for k, v in res_headers: res.add_header(k, v)
-            res.add_header('Transfer-Encoding', 'chunked')
-            res.send_header(req.stream)
-            res.header_sent = True
-
-        try:
-            for b in http.chunked(self.application(env, start_response)):
-                req.stream.write(b)
-            req.stream.flush()
-        except Exception, err:
-            if not res.header_sent:
-                res.send_header(req.stream)
-            self.accesslog(addr, req, res)
-            raise
-
-        self.accesslog(addr, req, res)
         return res
 
     def do_plugins(self, name, *p):
@@ -243,27 +181,3 @@ class Proxy(object):
             if not f: continue
             res = f(*p)
             if res: return
-
-    def do(self, req, addr):
-        res = self.do_plugins('pre', req)
-        if res is not None:
-            self.accesslog(addr, req, res)
-            return
-        if req.method.upper() == 'CONNECT':
-            return self.do_connect(req, addr)
-        u = urlparse.urlparse(req.uri)
-        if not u.netloc:
-            return self.do_service(req, addr)
-        res = self.do_http(req, addr)
-        return res
-
-    def handler(self, sock, addr):
-        stream = sock.makefile()
-        try:
-            while self.do(http.Request.recv_msg(stream), addr):
-                pass
-        except (EOFError, socket.error): logger.debug('network error')
-        except Exception, err: logger.exception('unknown')
-        finally:
-            sock.close()
-            logger.debug('connection closed')

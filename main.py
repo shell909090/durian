@@ -6,43 +6,39 @@
 '''
 import os, sys, getopt, logging
 from gevent.server import StreamServer
-
-def initlog(lv, logfile=None):
-    if isinstance(lv, basestring): lv = getattr(logging, lv)
-    rootlog = logging.getLogger()
-    if logfile: handler = logging.FileHandler(logfile)
-    else: handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter(
-            '%(asctime)s,%(msecs)03d (%(process)d)[%(levelname)s]%(name)s(%(filename)s:%(lineno)d): %(message)s',
-            '%Y-%m-%d %H:%M:%S'))
-    rootlog.addHandler(handler)
-    rootlog.setLevel(lv)
+import utils
 
 def main():
     '''
-durain [-a accessfile] [-l loglevel] [-h] [-p port]
+durain [-a accessfile] [-c configfile] [-f logfile] [-l loglevel] [-h] [-p port]
 options:
 * -a: accessfile
+* -c: config file
+* -f: logfile
 * -l: loglevel, DEBUG, INFO, WARNING, ERROR
 * -h: show help
 * -p: port
     '''
-    optlist, args = getopt.getopt(sys.argv[1:], 'a:l:hp:')
+    optlist, args = getopt.getopt(sys.argv[1:], 'a:c:f:l:hp:')
     optdict = dict(optlist)
     if '-h' in optdict:
         print main.__doc__
         return
 
-    import proxy
-    initlog(optdict.get('-l', 'WARNING'))
-    p = proxy.Proxy(accesslog=optdict.get('-a'))
-    p.application = __import__('manager').setup(p)
+    cfg = utils.getcfg(optdict.get('-c', [
+        'durian.conf', '~/.durian.conf', '/etc/durian/config']))
+    utils.initlog(
+        optdict.get('-l') or cfg.get('log.loglevel') or 'WARNING',
+        optdict.get('-c') or cfg.get('log.logfile'))
+    addr = (cfg.get('main.addr', ''),
+            int(optdict.get('-p') or cfg.get('main.port') or 8080))
+
+    import proxy, manager
+    p = proxy.Proxy(accesslog=optdict.get('-a') or cfg.get('log.access'))
+    p.application = manager.setup(p)
 
     try:
-        StreamServer(
-            ('', int(optdict.get('-p', 8080))),
-            p.handler).serve_forever()
+        StreamServer(addr, p.handler).serve_forever()
     except KeyboardInterrupt: pass
 
 if __name__ == '__main__': main()

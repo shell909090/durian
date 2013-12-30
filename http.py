@@ -4,9 +4,7 @@
 @date: 2012-04-26
 @author: shell.xu
 '''
-import socket, logging, urlparse
-
-logger = logging.getLogger('http')
+import sys, socket, logging, urlparse, datetime
 
 CHUNK_MIN   = 1024
 BUFSIZE     = 8192
@@ -63,16 +61,16 @@ DEFAULT_PAGES = {
     505:('HTTP Version Not Supported', 'Cannot fulfill request.'),
 }
 
-def dummy_write(d): return
-
 def capitalize_httptitle(k):
     return '-'.join([t.capitalize() for t in k.split('-')])
 
 def file_source(stream, size=BUFSIZE):
-    d = stream.read(size)
-    while d:
-        yield d
+    try:
         d = stream.read(size)
+        while d:
+            yield d
+            d = stream.read(size)
+    finally: stream.close()
 
 def chunked(f):
     for d in f: yield '%X\r\n%s\r\n' % (len(d), d)
@@ -118,7 +116,7 @@ class HttpMessage(object):
         line = stream.readline().strip()
         if len(line) == 0: raise EOFError()
         r = line.split(' ', 2)
-        if len(r) < 2: raise Exception('unknown format')
+        if len(r) < 2: raise Exception('unknown format', r)
         if len(r) < 3: r.append(DEFAULT_PAGES[int(r[1])][0])
         msg = cls(*r)
         msg.stream = stream
@@ -138,7 +136,7 @@ class HttpMessage(object):
 
     def read_chunk(self, stream, hasbody=False):
         if self.get_header('Transfer-Encoding', 'identity') != 'identity':
-            logger.debug('recv body on chunk mode')
+            logging.debug('recv body on chunk mode')
             chunk_size = 1
             while chunk_size:
                 chunk = stream.readline().rstrip().split(';')
@@ -146,11 +144,11 @@ class HttpMessage(object):
                 yield stream.read(chunk_size + 2)[:-2]
         elif self.has_header('Content-Length'):
             length = int(self.get_header('Content-Length'))
-            logger.debug('recv body on length mode, size: %s' % length)
+            logging.debug('recv body on length mode, size: %s' % length)
             for i in xrange(0, length, BUFSIZE):
                 yield stream.read(min(length - i, BUFSIZE))
         elif hasbody:
-            logger.debug('recv body on close mode')
+            logging.debug('recv body on close mode')
             d = stream.read(BUFSIZE)
             while d:
                 yield d
@@ -165,7 +163,9 @@ class HttpMessage(object):
     def sendto(self, stream, body=None, *p):
         body = body or self.body
         self.send_header(stream)
-        if body is None: return
+        if body is None:
+            stream.flush()
+            return
         if callable(body): body = body(*p)
         if hasattr(body, '__iter__'):
             for d in body: stream.write(d)
@@ -173,10 +173,10 @@ class HttpMessage(object):
         stream.flush()
 
     def debug(self):
-        logger.debug(self.d + self.get_startline())
+        logging.debug(self.d + self.get_startline())
         for k, l in self.headers.iteritems():
-            for v in l: logger.debug('%s%s: %s' % (self.d, k, v))
-        logger.debug('')
+            for v in l: logging.debug('%s%s: %s' % (self.d, k, v))
+        logging.debug('')
 
 class FileBase(object):
     def __enter__(self):
@@ -212,7 +212,7 @@ def request_http(uri, method=None, version=None, headers=None, body=None):
         req.body = body
     return req
 
-class RequestFile(FileBase):
+class RequestWriteFile(FileBase):
 
     def __init__(self, stream):
         self.stream = stream
@@ -226,6 +226,20 @@ class RequestFile(FileBase):
 
     def get_response(self):
         return Response.recv_msg(self.stream)
+
+class RequestReadFile(object):
+
+    def __init__(self, req):
+        self.it, self.buf = req.read_chunk(req.stream), ''
+
+    def read(self, size=None):
+        try:
+            while size is None or len(self.buf) < size:
+                self.buf += self.it.next()
+        except StopIteration:
+            size = len(self.buf)
+        r, self.buf = self.buf[:size], self.buf[size:]
+        return r
 
 class Response(HttpMessage):
     d = '< '
@@ -316,3 +330,94 @@ def download(url, method=None, headers=None, data=None):
     except:
         sock.close()
         raise
+
+class WebServer(object):
+
+    def __init__(self, do, accesslog=None):
+        self.do = do
+        if accesslog == '': self.accessfile = sys.stdout
+        elif accesslog: self.accessfile = open(accesslog, 'a')
+
+    def http_handler(self, req):
+        req.url = urlparse.urlparse(req.uri)
+        res = self.do(req)
+        if res is None: res = response_http(500, body='service internal error')
+        res.sendto(req.stream)
+        return res
+
+    def record_access(self, req, res, addr):
+        if not hasattr(self, 'accessfile'): return
+        if res is not None:
+            code = res.code
+            length = res.get_header('Content-Length')
+            if length is None and hasattr(res, 'length'):
+                length = str(res.length)
+            if length is None: length = '-'
+        else: code, length = 500, '-'
+        self.accessfile.write(
+            '%s:%d - - [%s] "%s" %d %s "-" %s\n' % (
+                addr[0], addr[1], datetime.datetime.now().isoformat(),
+                req.get_startline(), code, length, req.get_header('User-Agent')))
+        self.accessfile.flush()
+
+    def handler(self, sock, addr):
+        stream = sock.makefile()
+        res = True
+        try:
+            while res:
+                req = Request.recv_msg(stream)
+                req.remote = addr
+                res = self.http_handler(req)
+                self.record_access(req, res, addr)
+        except (EOFError, socket.error): logging.info('network error')
+        except Exception, err: logging.exception('unknown')
+        finally:
+            sock.close()
+            logging.debug('connection closed')
+
+class WSGIServer(WebServer):
+
+    def __init__(self, application, accesslog=None):
+        self.application = application
+        if accesslog == '': self.accessfile = sys.stdout
+        elif accesslog: self.accessfile = open(accesslog, 'a')
+
+    def req2env(self, req):
+        env = dict(('HTTP_' + k.upper().replace('-', '_'), v)
+                   for k, v in req.iter_headers())
+        env['REQUEST_METHOD'] = req.method
+        env['SCRIPT_NAME'] = ''
+        env['PATH_INFO'] = req.url.path
+        env['QUERY_STRING'] = req.url.query
+        env['CONTENT_TYPE'] = req.get_header('Content-Type')
+        env['CONTENT_LENGTH'] = req.get_header('Content-Length')
+        env['SERVER_PROTOCOL'] = req.version
+        if req.method in set(['POST', 'PUT']):
+            env['wsgi.input'] = RequestReadFile(req)
+        return env
+
+    def http_handler(self, req):
+        req.url = urlparse.urlparse(req.uri)
+        env = self.req2env(req)
+
+        res = response_http(500)
+        req.header_sent = False
+        def start_response(status, res_headers):
+            r = status.split(' ', 1)
+            res.code = int(r[0])
+            if len(r) > 1: res.phrase = r[1]
+            else: res.phrase = DEFAULT_PAGES[resp.code][0]
+            for k, v in res_headers: res.add_header(k, v)
+            res.add_header('Transfer-Encoding', 'chunked')
+            res.send_header(req.stream)
+            res.header_sent = True
+
+        try:
+            for b in chunked(self.application(env, start_response)):
+                req.stream.write(b)
+            req.stream.flush()
+        except Exception, err:
+            if hasattr(res, 'header_sent') and not res.header_sent:
+                res.send_header(req.stream)
+            raise
+        return res
