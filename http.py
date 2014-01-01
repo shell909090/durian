@@ -68,15 +68,22 @@ def file_source(stream, size=BUFSIZE):
         d = stream.read(size)
 
 def chunked_body(stream):
-    chunk_size = 1
+    chunk = stream.readline().rstrip().split(';')
+    chunk_size = int(chunk[0], 16)
     while chunk_size:
+        d = stream.read(chunk_size + 2)
+        if not d: raise EOFError
+        d = d[:-2]
+        if not d: break
+        yield d
         chunk = stream.readline().rstrip().split(';')
         chunk_size = int(chunk[0], 16)
-        yield stream.read(chunk_size + 2)[:-2]
 
 def length_body(stream, length):
     for i in xrange(0, length, BUFSIZE):
-        yield stream.read(min(length - i, BUFSIZE))
+        d = stream.read(min(length - i, BUFSIZE))
+        if not d: raise EOFError
+        yield d
 
 def chunked(f):
     for d in f: yield '%X\r\n%s\r\n' % (len(d), d)

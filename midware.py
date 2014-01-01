@@ -4,9 +4,7 @@
 @date: 2013-12-08
 @author: shell.xu
 '''
-import base64
-
-logger = logging.getLogger()
+import base64, logging
 
 class Auth(object):
 
@@ -23,20 +21,17 @@ class Auth(object):
         self.users[name] = passwd
 
     def pre(self, req):
-        auth = req.get_header('Proxy-Authorization')
+        auth = req.get('Proxy-Authorization')
         if auth:
             user, passwd = base64.b64decode(auth).split(':', 1)
             if self.users.get(user) == passwd:
-                req.del_header('Proxy-Authorization')
+                del req['Proxy-Authorization']
                 return
-        res = http.response_http(407)
-        res.add_header('Proxy-Authenticate', 'durian')
+            else: logging.warning('login failed with %s:%s' % (user, passwd))
+        res = http.response_http(407, headers={
+            'Proxy-Authenticate': 'durian'})
         res.sendto(req.stream)
-        req.stream.flush()
         return res
-
-    def post(self, req, resp):
-        pass
 
 # TODO: cache
 class Cache(object):
