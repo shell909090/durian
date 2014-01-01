@@ -8,6 +8,9 @@ import os, sys, getopt, logging
 from gevent.server import StreamServer
 import utils
 
+from gevent import monkey
+monkey.patch_all()
+
 def main():
     '''
 durain [-a accessfile] [-c configfile] [-f logfile] [-l loglevel] [-h] [-p port]
@@ -30,6 +33,8 @@ options:
     utils.initlog(
         optdict.get('-l') or cfg.get('log.loglevel') or 'WARNING',
         optdict.get('-c') or cfg.get('log.logfile'))
+    import http
+    http.connector.max_addr = int(cfg.get('pool.maxaddr', 10))
     addr = (cfg.get('main.addr', ''),
             int(optdict.get('-p') or cfg.get('main.port') or 8080))
 

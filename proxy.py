@@ -9,9 +9,6 @@ import http
 from datetime import datetime
 from gevent import socket, select
 
-import threading
-lp = threading.Lock()
-
 def fdcopy(fd1, fd2):
     fdlist = [fd1, fd2]
     while True:
@@ -21,21 +18,6 @@ def fdcopy(fd1, fd2):
             if not d: raise EOFError()
             try: os.write(fd2 if rfd == fd1 else fd1, d)
             except OSError: raise EOFError()
-
-class Connector(object):
-
-    def connect(self, addr):
-        sock = socket.socket()
-        try: sock.connect(addr)
-        except IOError:
-            sock.close()
-            return
-        return sock
-
-    def close(self, sock):
-        sock.close()
-
-connector = Connector()
 
 class Meter(object):
 
@@ -48,7 +30,7 @@ class Meter(object):
             yield c
 
 class Proxy(http.WSGIServer):
-    VERBOSE = True
+    VERBOSE = False
     hopHeaders = ['Connection', 'Keep-Alive', 'Te', 'Trailers', 'Upgrade']
 
     def __init__(self, application=None, accesslog=None):
@@ -56,28 +38,25 @@ class Proxy(http.WSGIServer):
         self.plugins, self.in_query = [], []
 
     def http_handler(self, req):
-        with lp:
-            res = self.do_plugins('pre', req)
-            if res is not None:
-                return
-            if req.method.upper() == 'CONNECT':
-                return self.connect_handler(req)
-            u = urlparse.urlparse(req.uri)
-            if not u.netloc:
-                return http.WSGIServer.http_handler(self, req)
-            res = self.do_http(req)
-            return res
+        res = self.do_plugins('pre', req)
+        if res is not None:
+            return
+        if req.method.upper() == 'CONNECT':
+            return self.connect_handler(req)
+        u = urlparse.urlparse(req.uri)
+        if not u.netloc:
+            return http.WSGIServer.http_handler(self, req)
+        res = self.do_http(req)
+        return res
 
     def connect_handler(self, req):
         r = req.uri.split(':', 1)
         host = r[0]
         port = int(r[1]) if len(r) > 1 else 80
 
-        sock = connector.connect((host, port))
-        if sock is None:
-            return http.response_to(req, 502)
+        try: sock = http.connector.connect((host, port))
+        except IOError: return http.response_to(req, 502)
 
-        res = None
         req.start_time = datetime.now()
         self.in_query.append(req)
 
@@ -87,7 +66,7 @@ class Proxy(http.WSGIServer):
 
         finally:
             self.in_query.remove(req)
-            connector.close(sock)
+            sock.close()
         return None
             
     def clone_msg(self, msg):
@@ -99,45 +78,6 @@ class Proxy(http.WSGIServer):
             if k in msgx: del msgx[k]
         return msgx
 
-    def round_trip(self, reqx, keepalive):
-        sock = connector.connect(reqx.remote)
-        if sock is None:
-            res = http.response_to(reqx, 502)
-            return res
-        streamx = sock.makefile()
-
-        try:
-            # TODO: persistent connection
-            reqx.add('Connection', 'close')
-            if self.VERBOSE: reqx.debug()
-            reqx.sendto(streamx)
-
-            resx = http.Response.recvfrom(streamx)
-            if self.VERBOSE: resx.debug()
-
-            hasbody = reqx.method.upper() != 'HEAD'
-
-            res = self.clone_msg(resx)
-            if not hasbody or resx.body is None: m = None
-            else: m = Meter(resx.body)
-            res.body = m
-
-            if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
-                    'Content-Length' not in resx, hasbody)):
-                keepalive = False
-
-            res.connection = keepalive
-            res['Connection'] = 'keep-alive' if keepalive else 'close'
-
-            if self.VERBOSE: res.debug()
-            res.sendto(reqx.stream)
-            res.length = 0 if m is None else m.counter
-
-        finally:
-            connector.close(sock)
-
-        return res
-
     def do_http(self, req):
         host, port, uri = http.parseurl(req.uri)
 
@@ -146,8 +86,8 @@ class Proxy(http.WSGIServer):
         reqx.uri = uri
         reqx.remote = (host, port)
         reqx['Host'] = host if port == 80 else '%s:%d' % (host, port)
+        if self.VERBOSE: reqx.debug()
 
-        # keepalive = False
         if req.version == 'HTTP/1.1':
             keepalive = not any((
                 req.get('Connection', '').lower() == 'close',
@@ -158,13 +98,32 @@ class Proxy(http.WSGIServer):
                 req.get('Proxy-Connection', '').lower() == 'keep-alive',
                 'Keep-Alive' in req))
 
-        res = None
         req.start_time = datetime.now()
         self.in_query.append(req)
+        res, resx = None, http.round_trip(reqx)
 
         try:
-            res = self.round_trip(reqx, keepalive)
-        finally: self.in_query.remove(req)
+            if self.VERBOSE: resx.debug()
+            res = self.clone_msg(resx)
+
+            hasbody = reqx.method.upper() != 'HEAD'
+            if not hasbody or resx.body is None: m = None
+            else: m = Meter(resx.body)
+            res.body = m
+
+            if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
+                    'Content-Length' not in resx, hasbody)):
+                keepalive = False
+            res.connection = keepalive
+            res['Connection'] = 'keep-alive' if keepalive else 'close'
+
+            if self.VERBOSE: res.debug()
+            res.sendto(req.stream)
+            res.length = 0 if m is None else m.counter
+
+        finally:
+            self.in_query.remove(req)
+            resx.close()
         return res
 
     def do_plugins(self, name, *p):

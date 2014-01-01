@@ -147,6 +147,11 @@ class HttpMessage(object):
                 self.add(h.strip(), v.strip())
             else: self.add(h.strip(), line.strip())
 
+    def debug(self):
+        logging.debug(self.d + self.get_startline())
+        for k, v in self: logging.debug('%s%s: %s' % (self.d, k, v))
+        logging.debug('')
+
     @classmethod
     def recvfrom(cls, stream):
         line = stream.readline().strip()
@@ -168,15 +173,16 @@ class HttpMessage(object):
             msg.body = file_source(stream)
             logging.debug('recv body on close mode')
         else: logging.debug('recv body on nobody mode')
+        if hasattr(msg, 'recvdone'): msg.recvdone()
         return msg
 
-    def read_body(self):
+    def readbody(self):
         if hasattr(self.body, '__iter__'): self.body = ''.join(self.body)
         if hasattr(self.body, 'read'): self.body = self.body.read()
         return self.body
 
-    def read_form(self):
-        return dict(i.split('=', 1) for i in self.read_body().split('&'))
+    def readform(self):
+        return dict(i.split('=', 1) for i in self.readbody().split('&'))
 
     def sendto(self, stream):
         if hasattr(self.body, 'read'): # transfer file to chunk
@@ -191,16 +197,9 @@ class HttpMessage(object):
         self.send_header(stream)
         if self.body is None: return
         if hasattr(self.body, '__iter__'):
-            # FIXME: check length for stream?
             for b in self.body: stream.write(b)
         else: stream.write(self.body)
         stream.flush()
-
-    def debug(self):
-        logging.debug(self.d + self.get_startline())
-        for k, l in self.headers.iteritems():
-            for v in l: logging.debug('%s%s: %s' % (self.d, k, v))
-        logging.debug('')
 
 class FileBase(object):
     def __enter__(self):
@@ -253,7 +252,16 @@ class Response(HttpMessage):
         self.version, self.code, self.phrase = version, int(code), phrase
         self.connection, self.cache = True, 0
 
+    def recvdone(self):
+        if self.version == 'HTTP/1.1':
+            self.connection = self.get('Connection') != 'close'
+        else: self.connection = self.get('Connection') == 'keep-alive'
+
     def __nonzero__(self): return self.connection
+
+    def close(self):
+        if not self.connection: self.stream.close()
+        else: connector.release(self.stream._sock)
 
     def get_startline(self):
         return ' '.join((self.version, str(self.code), self.phrase))
@@ -285,14 +293,10 @@ class ResponseFile(FileBase):
 
     def __init__(self, resp):
         self.resp, self.f = resp, BufferedFile(resp.body)
-        self.read = self.f.read
+        self.read, self.close = self.f.read, resp.close
 
     def getcode(self):
         return int(self.resp.code)
-
-    def close(self):
-        if self.resp.get('Connection') != 'keep-alive':
-            self.resp.stream.close()
 
 def parseurl(url):
     u = urlparse.urlparse(url)
@@ -303,21 +307,6 @@ def parseurl(url):
     else: host, port = u.netloc.split(':', 1)
     return host, int(port), uri
 
-# connection pool
-def download(url, method=None, headers=None, data=None):
-    host, port, uri = parseurl(url)
-    req = request_http(uri, method, headers=headers, body=data)
-    req['Host'] = host
-    sock = socket.socket()
-    sock.connect((host, port))
-    stream = sock.makefile()
-    try:
-        req.sendto(stream)
-        return Response.recvfrom(stream)
-    except:
-        sock.close()
-        raise
-
 class WebServer(object):
 
     def __init__(self, application, accesslog=None):
@@ -326,7 +315,6 @@ class WebServer(object):
         elif accesslog: self.accessfile = open(accesslog, 'a')
 
     def record_access(self, req, res, addr):
-        print 'length', res.length
         if not hasattr(self, 'accessfile'): return
         if res is None: code, length = 500, None
         else: code, length = res.code, res.length
@@ -407,29 +395,49 @@ class SocketPool(object):
         self.lock = threading.RLock()
         self.buf, self.max_addr = {}, max_addr
 
-    def acquire(self, host, port):
-        conn, addr = None, (socket.gethostbyname(host), port)
+    def connect(self, addr):
+        host, conn = addr[0], None
+        addr = (socket.gethostbyname(host), addr[1])
         with self.lock:
             if self.buf.get(addr):
                 conn = self.buf[addr].pop(0)
                 logging.debug('acquire conn %s:%d size %d' % (
-                    host, port, len(self.buf[addr])))
+                    host, addr[1], len(self.buf[addr])))
         if conn is None:
+            logging.debug('create new conn: %s:%d' % (host, addr[1]))
             conn = socket.socket()
-            conn.connect(addr)
-            conn.origclose = conn.close
-            conn.close = lambda : self.release(conn)
+            try: conn.connect(addr)
+            except IOError: return
         return conn
 
     def release(self, conn):
         addr = conn.getpeername()
         with self.lock:
             self.buf.setdefault(addr, [])
-            if self.max_addr and len(self.buf[addr]) < self.max_addr:
+            if self.max_addr <= 0 or len(self.buf[addr]) < self.max_addr:
                 self.buf[addr].append(conn)
-                logging.debug('release conn %s:%d size %d' % (
+                logging.debug('release conn %s:%d back size %d' % (
                     addr[0], addr[1], len(self.buf[addr])))
                 return
-        conn.origclose()
+        logging.debug('free conn %s:%d.' % (addr[0], addr[1]))
+        conn.close()
 
-    def close(self, conn): conn.origclose()
+connector = SocketPool()
+
+def round_trip(req):
+    try: sock = connector.connect(req.remote)
+    except IOError: return response_to(req, 502)
+    req.stream = sock.makefile()
+    try:
+        req.sendto(req.stream)
+        return Response.recvfrom(req.stream)
+    except:
+        sock.close()
+        raise
+
+def download(url, method=None, headers=None, data=None):
+    host, port, uri = parseurl(url)
+    req = request_http(uri, method, headers=headers, body=data)
+    req.remote = (host, port)
+    req['Host'] = host
+    return round_trip(req)
