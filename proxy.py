@@ -9,7 +9,8 @@ import http
 from datetime import datetime
 from gevent import socket, select
 
-logger = logging.getLogger()
+import threading
+lp = threading.Lock()
 
 def fdcopy(fd1, fd2):
     fdlist = [fd1, fd2]
@@ -55,17 +56,17 @@ class Proxy(http.WSGIServer):
         self.plugins, self.in_query = [], []
 
     def http_handler(self, req):
-        res = self.do_plugins('pre', req)
-        if res is not None:
-            self.accesslog(addr, req, res)
-            return
-        if req.method.upper() == 'CONNECT':
-            return self.connect_handler(req)
-        u = urlparse.urlparse(req.uri)
-        if not u.netloc:
-            return http.WSGIServer.http_handler(self, req)
-        res = self.do_http(req)
-        return res
+        with lp:
+            res = self.do_plugins('pre', req)
+            if res is not None:
+                return
+            if req.method.upper() == 'CONNECT':
+                return self.connect_handler(req)
+            u = urlparse.urlparse(req.uri)
+            if not u.netloc:
+                return http.WSGIServer.http_handler(self, req)
+            res = self.do_http(req)
+            return res
 
     def connect_handler(self, req):
         r = req.uri.split(':', 1)
@@ -74,9 +75,7 @@ class Proxy(http.WSGIServer):
 
         sock = connector.connect((host, port))
         if sock is None:
-            res = http.response_to(req, 502)
-            self.record_access(req, res, req.addr)
-            return
+            return http.response_to(req, 502)
 
         res = None
         req.start_time = datetime.now()
@@ -84,24 +83,24 @@ class Proxy(http.WSGIServer):
 
         try:
             res = http.response_to(req, 200)
-            self.record_access(req, res, req.addr)
             fdcopy(req.stream.fileno(), sock.fileno())
 
         finally:
             self.in_query.remove(req)
             connector.close(sock)
-
+        return None
+            
     def clone_msg(self, msg):
         msgx = copy.copy(msg)
         msgx.headers = msg.headers.copy()
-        for k, v in msg.headers.iteritems():
-            if k.startswith('Proxy-'): msgx.del_header(k)
+        for k in msg.headers.iterkeys():
+            if k.startswith('Proxy'): del msgx[k]
         for k in self.hopHeaders:
-            if msgx.has_header(k): msgx.del_header(k)
+            if k in msgx: del msgx[k]
         return msgx
 
     def round_trip(self, reqx, keepalive):
-        sock = connector.connect(reqx.addr)
+        sock = connector.connect(reqx.remote)
         if sock is None:
             res = http.response_to(reqx, 502)
             return res
@@ -109,31 +108,30 @@ class Proxy(http.WSGIServer):
 
         try:
             # TODO: persistent connection
-            reqx.add_header('Connection', 'close')
+            reqx.add('Connection', 'close')
             if self.VERBOSE: reqx.debug()
             reqx.sendto(streamx)
 
-            resx = http.Response.recv_msg(streamx)
+            resx = http.Response.recvfrom(streamx)
             if self.VERBOSE: resx.debug()
 
-            hasbody = reqx.method.upper() != 'HEAD' and resx.code not in http.CODE_NOBODY
+            hasbody = reqx.method.upper() != 'HEAD'
 
             res = self.clone_msg(resx)
-            m = Meter(resx.read_chunk(streamx, hasbody))
+            if not hasbody or resx.body is None: m = None
+            else: m = Meter(resx.body)
             res.body = m
-            if resx.get_header('Transfer-Encoding', 'identity') != 'identity':
-                res.body = http.chunked(res.body)
 
-            if all((resx.get_header('Transfer-Encoding', 'identity') == 'identity',
-                    not resx.has_header('Content-Length'), hasbody)):
+            if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
+                    'Content-Length' not in resx, hasbody)):
                 keepalive = False
 
             res.connection = keepalive
-            res.set_header('Connection', 'keep-alive' if keepalive else 'close')
+            res['Connection'] = 'keep-alive' if keepalive else 'close'
 
             if self.VERBOSE: res.debug()
             res.sendto(reqx.stream)
-            res.length = m.counter
+            res.length = 0 if m is None else m.counter
 
         finally:
             connector.close(sock)
@@ -146,22 +144,19 @@ class Proxy(http.WSGIServer):
         if self.VERBOSE: req.debug()
         reqx = self.clone_msg(req)
         reqx.uri = uri
-        reqx.addr = (host, port)
-        reqx.body = req.read_chunk(req.stream)
-        if req.get_header('Transfer-Encoding', 'identity') != 'identity':
-            reqx.body = http.chunked(reqx.body)
-        reqx.set_header('Host', host)
+        reqx.remote = (host, port)
+        reqx['Host'] = host if port == 80 else '%s:%d' % (host, port)
 
         # keepalive = False
         if req.version == 'HTTP/1.1':
             keepalive = not any((
-                req.get_header('Connection', '').lower() == 'close',
-                req.get_header('Proxy-Connection', '').lower() == 'close'))
+                req.get('Connection', '').lower() == 'close',
+                req.get('Proxy-Connection', '').lower() == 'close'))
         else:
             keepalive = any((
-                req.get_header('Connection', '').lower() == 'keep-alive',
-                req.get_header('Proxy-Connection', '').lower() == 'keep-alive',
-                req.has_header('Keep-Alive')))
+                req.get('Connection', '').lower() == 'keep-alive',
+                req.get('Proxy-Connection', '').lower() == 'keep-alive',
+                'Keep-Alive' in req))
 
         res = None
         req.start_time = datetime.now()
@@ -169,10 +164,7 @@ class Proxy(http.WSGIServer):
 
         try:
             res = self.round_trip(reqx, keepalive)
-
-        finally:
-            self.in_query.remove(req)
-
+        finally: self.in_query.remove(req)
         return res
 
     def do_plugins(self, name, *p):
