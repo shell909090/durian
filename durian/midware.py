@@ -4,7 +4,7 @@
 @date: 2013-12-08
 @author: shell.xu
 '''
-import base64, logging
+import base64, logging, cStringIO
 import http
 
 class Auth(object):
@@ -23,7 +23,7 @@ class Auth(object):
 
     def setup(self, proxy):
         http_handler = proxy.http_handler
-        def inner(req):
+        def new_http_handler(req):
             res = self.auth(req)
             return http_handler(req) if res is None else res
         proxy.http_handler = inner
@@ -44,13 +44,32 @@ class Auth(object):
         return res
 
 # TODO: cache
+
+class CacheableFile(object):
+
+    def __init__(self, src, maxlength=0):
+        self.src, self.maxlength = src, maxlength
+        self.buf = cStringIO.StringIO()
+
+    def __iter__(self):
+        for c in self.src:
+            self.buf.write(c)
+            yield c
+
 class Cache(object):
 
     def __init__(self):
         pass
 
-    def pre(self, req):
-        pass
+    def setup(self, proxy):
+        clone_msg = proxy.clone_msg
+        def new_clone_msg(msg):
+            msgx = clone_msg(msg)
+            if isinstance(msg, http.Response):
+                pass
+        proxy.clone_msg = new_clone_msg
 
-    def post(self, req, resp):
-        pass
+        do_http = proxy.do_http
+        def new_do_http(req):
+            pass
+        proxy.do_http = new_do_http

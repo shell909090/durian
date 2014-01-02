@@ -41,10 +41,8 @@ class Proxy(http.WSGIServer):
         if req.method.upper() == 'CONNECT':
             return self.connect_handler(req)
         u = urlparse.urlparse(req.uri)
-        if not u.netloc:
-            return http.WSGIServer.http_handler(self, req)
-        res = self.do_http(req)
-        return res
+        if u.netloc: return self.do_http(req)
+        return http.WSGIServer.http_handler(self, req)
 
     def connect_handler(self, req):
         r = req.uri.split(':', 1)
@@ -80,8 +78,7 @@ class Proxy(http.WSGIServer):
 
         if self.VERBOSE: req.debug()
         reqx = self.clone_msg(req)
-        reqx.uri = uri
-        reqx.remote = (host, port)
+        reqx.remote, reqx.uri = (host, port), uri
         reqx['Host'] = host if port == 80 else '%s:%d' % (host, port)
         if self.VERBOSE: reqx.debug()
 
@@ -97,28 +94,29 @@ class Proxy(http.WSGIServer):
 
         req.start_time = datetime.now()
         self.in_query.append(req)
-        res, resx = None, http.round_trip(reqx)
 
         try:
-            if self.VERBOSE: resx.debug()
-            res = self.clone_msg(resx)
+            res, resx = None, http.round_trip(reqx)
 
-            hasbody = reqx.method.upper() != 'HEAD'
-            if not hasbody or resx.body is None: m = None
-            else: m = Meter(resx.body)
-            res.body = m
+            try:
+                if self.VERBOSE: resx.debug()
+                res = self.clone_msg(resx)
 
-            if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
-                    'Content-Length' not in resx, hasbody)):
-                keepalive = False
-            res.connection = keepalive
-            res['Connection'] = 'keep-alive' if keepalive else 'close'
+                hasbody = reqx.method.upper() != 'HEAD'
+                if not hasbody or resx.body is None: m = None
+                else: m = Meter(resx.body)
+                res.body = m
 
-            if self.VERBOSE: res.debug()
-            res.sendto(req.stream)
-            res.length = 0 if m is None else m.counter
+                if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
+                        'Content-Length' not in resx, hasbody)):
+                    keepalive = False
+                res.connection = keepalive
+                res['Connection'] = 'keep-alive' if keepalive else 'close'
 
-        finally:
-            self.in_query.remove(req)
-            resx.close()
+                if self.VERBOSE: res.debug()
+                res.sendto(req.stream)
+                res.length = 0 if m is None else m.counter
+
+            finally: resx.close()
+        finally: self.in_query.remove(req)
         return res
