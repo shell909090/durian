@@ -6,11 +6,9 @@ It support GET and CONNECT, and have http service in same port.
 
 # Usage #
 
-Run `python main.py -p port` to start.
+Run `durian.sh` to start.
 
-use -a to setup accesslog.
-
-run `python main -h` show more help.
+durian.conf is config file.
 
 # Files #
 

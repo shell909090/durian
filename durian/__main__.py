@@ -15,14 +15,10 @@ def main():
     '''
 durain [-a accessfile] [-c configfile] [-f logfile] [-l loglevel] [-h] [-p port]
 options:
-* -a: accessfile
 * -c: config file
-* -f: logfile
-* -l: loglevel, DEBUG, INFO, WARNING, ERROR
 * -h: show help
-* -p: port
     '''
-    optlist, args = getopt.getopt(sys.argv[1:], 'a:c:f:l:hp:')
+    optlist, args = getopt.getopt(sys.argv[1:], 'c:f:l:h')
     optdict = dict(optlist)
     if '-h' in optdict:
         print main.__doc__
@@ -30,17 +26,24 @@ options:
 
     cfg = utils.getcfg(optdict.get('-c', [
         'durian.conf', '~/.durian.conf', '/etc/durian/config']))
-    utils.initlog(
-        optdict.get('-l') or cfg.get('log.loglevel') or 'WARNING',
-        optdict.get('-c') or cfg.get('log.logfile'))
+    utils.initlog(cfg.get('log.loglevel', 'WARNING'), cfg.get('log.logfile'))
     import http
     http.connector.max_addr = int(cfg.get('pool.maxaddr', 10))
-    addr = (cfg.get('main.addr', ''),
-            int(optdict.get('-p') or cfg.get('main.port') or 8080))
+    addr = (cfg.get('main.addr', ''), int(cfg.get('main.port') or 8080))
 
     import proxy, manager
-    p = proxy.Proxy(accesslog=optdict.get('-a') or cfg.get('log.access'))
+    p = proxy.Proxy(accesslog=cfg.get('log.access'))
     p.application = manager.setup(p)
+
+    import midware
+    if cfg.get('auth.username'):
+        auth = midware.Auth()
+        auth.add(cfg.get('auth.username'), cfg.get('auth.password'))
+        auth.setup(p)
+    elif cfg.get('auth.userfile'):
+        auth = midware.Auth()
+        auth.loadfile(cfg.get('auth.userfile'))
+        auth.setup(p)
 
     try:
         StreamServer(addr, p.handler).serve_forever()

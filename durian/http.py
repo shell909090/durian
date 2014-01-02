@@ -285,7 +285,7 @@ def response_http(code, phrase=None, version=None,
     res = Response(version, code, phrase)
     if isinstance(headers, dict): headers = headers.items()
     if headers:
-        for k, v in headers: req.add(k, v)
+        for k, v in headers: res.add(k, v)
     if body: res.body = body
     res.cache = cache
     return res

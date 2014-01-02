@@ -35,12 +35,9 @@ class Proxy(http.WSGIServer):
 
     def __init__(self, application=None, accesslog=None):
         super(Proxy, self).__init__(application, accesslog)
-        self.plugins, self.in_query = [], []
+        self.in_query = []
 
     def http_handler(self, req):
-        res = self.do_plugins('pre', req)
-        if res is not None:
-            return
         if req.method.upper() == 'CONNECT':
             return self.connect_handler(req)
         u = urlparse.urlparse(req.uri)
@@ -125,10 +122,3 @@ class Proxy(http.WSGIServer):
             self.in_query.remove(req)
             resx.close()
         return res
-
-    def do_plugins(self, name, *p):
-        for p in self.plugins:
-            f = getattr(p, name)
-            if not f: continue
-            res = f(*p)
-            if res: return
