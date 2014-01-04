@@ -31,7 +31,8 @@ class Meter(object):
 
 class Proxy(http.WSGIServer):
     VERBOSE = False
-    hopHeaders = ['Connection', 'Keep-Alive', 'Te', 'Trailers', 'Upgrade']
+    hopHeaders = ['Transfer-Encoding', 'Connection', 'Keep-Alive',
+                  'Te', 'Trailers', 'Upgrade']
 
     def __init__(self, application=None, accesslog=None):
         super(Proxy, self).__init__(application, accesslog)
@@ -73,24 +74,27 @@ class Proxy(http.WSGIServer):
             if k in msgx: del msgx[k]
         return msgx
 
+    def iskeepalive(self, msg):
+        if msg.version == 'HTTP/1.1':
+            msg.keepalive = not any((
+                msg.get('Connection', '').lower() == 'close',
+                msg.get('Proxy-Connection', '').lower() == 'close'))
+        else:
+            msg.keepalive = any((
+                msg.get('Connection', '').lower() == 'keep-alive',
+                msg.get('Proxy-Connection', '').lower() == 'keep-alive',
+                'Keep-Alive' in msg))
+
     def do_http(self, req):
         host, port, uri = http.parseurl(req.uri)
+        self.iskeepalive(req)
 
         if self.VERBOSE: req.debug()
         reqx = self.clone_msg(req)
+        reqx.keepalive = True
         reqx.remote, reqx.uri = (host, port), uri
         reqx['Host'] = host if port == 80 else '%s:%d' % (host, port)
         if self.VERBOSE: reqx.debug()
-
-        if req.version == 'HTTP/1.1':
-            keepalive = not any((
-                req.get('Connection', '').lower() == 'close',
-                req.get('Proxy-Connection', '').lower() == 'close'))
-        else:
-            keepalive = any((
-                req.get('Connection', '').lower() == 'keep-alive',
-                req.get('Proxy-Connection', '').lower() == 'keep-alive',
-                'Keep-Alive' in req))
 
         req.start_time = datetime.now()
         self.in_query.append(req)
@@ -101,17 +105,17 @@ class Proxy(http.WSGIServer):
             try:
                 if self.VERBOSE: resx.debug()
                 res = self.clone_msg(resx)
+                if hasattr(self, 'reqdone'): self.reqdone(req, res)
 
                 hasbody = reqx.method.upper() != 'HEAD'
-                if not hasbody or resx.body is None: m = None
-                else: m = Meter(resx.body)
+                if not hasbody or res.body is None: m = None
+                else: m = Meter(res.body)
                 res.body = m
 
+                res.keepalive = req.keepalive
                 if all((resx.get('Transfer-Encoding', 'identity') == 'identity',
                         'Content-Length' not in resx, hasbody)):
-                    keepalive = False
-                res.connection = keepalive
-                res['Connection'] = 'keep-alive' if keepalive else 'close'
+                    res.keepalive = False
 
                 if self.VERBOSE: res.debug()
                 res.sendto(req.stream)

@@ -34,6 +34,8 @@ options:
     import proxy, manager
     p = proxy.Proxy(accesslog=cfg.get('log.access'))
     p.application = manager.setup(p)
+    if cfg.get('log.verbose'):
+        p.VERBOSE = True
 
     import midware
     if cfg.get('auth.username'):
@@ -44,6 +46,11 @@ options:
         auth = midware.Auth()
         auth.loadfile(cfg.get('auth.userfile'))
         auth.setup(p)
+    if cfg.get('cache.engine'):
+        store = None
+        if cfg['cache.engine'] == 'memory':
+            store = midware.MemoryCache(cfg.get('cache.size', 100))
+        if store: midware.Cache(store).setup(p)
 
     try:
         StreamServer(addr, p.handler).serve_forever()
