@@ -1,0 +1,14 @@
+Source: durian
+Section: net
+Priority: extra
+Maintainer: Shell Xu <shell909090@gmail.com>
+Build-Depends: debhelper (>= 8), python
+Standards-Version: 3.9.4
+Homepage: https://github.com/shell909090/durian
+Vcs-Git: https://github.com/shell909090/durian.git
+
+Package: durian
+Architecture: all
+Depends: ${shlibs:Depends}, ${misc:Depends}, python, python-gevent, python-webpy
+Description: proxy written by python
+ proxy written by python.

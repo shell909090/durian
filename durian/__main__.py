@@ -13,7 +13,7 @@ monkey.patch_all()
 
 def main():
     '''
-durain [-a accessfile] [-c configfile] [-f logfile] [-l loglevel] [-h] [-p port]
+durain [-c configfile] [-h]
 options:
 * -c: config file
 * -h: show help
@@ -25,7 +25,7 @@ options:
         return
 
     cfg = utils.getcfg(optdict.get('-c', [
-        'durian.conf', '~/.durian.conf', '/etc/durian/config']))
+        'durian.conf', '~/.durian.conf', '/etc/durian/durian.conf']))
     utils.initlog(cfg.get('log.loglevel', 'WARNING'), cfg.get('log.logfile'))
     import http
     http.connector.max_addr = int(cfg.get('pool.maxaddr', 10))
