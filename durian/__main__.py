@@ -26,10 +26,11 @@ options:
 
     cfg = utils.getcfg(optdict.get('-c', [
         'durian.conf', '~/.durian.conf', '/etc/durian/durian.conf']))
-    utils.initlog(cfg.get('log', 'loglevel') or 'WARNING', cfg.get('log', 'logfile'))
+    utils.initlog(cfg.get('log', 'loglevel'), cfg.get('log', 'logfile'))
     import http
-    http.connector.max_addr = cfg.getint('pool', 'maxaddr') or 10
-    addr = (cfg.get('main', 'addr'), cfg.getint('main', 'port') or 8080)
+    if cfg.has_section('pool'):
+        http.connector.max_addr = cfg.getint('pool', 'maxaddr')
+    addr = (cfg.get('main', 'addr'), cfg.getint('main', 'port'))
 
     import proxy, manager
     p = proxy.Proxy(accesslog=cfg.get('log', 'access'))
@@ -48,7 +49,7 @@ options:
     if cfg.has_section('cache'):
         store = None
         if cfg.get('cache', 'engine') == 'memory':
-            store = midware.MemoryCache(cfg.getint('cache', 'size') or 100)
+            store = midware.MemoryCache(cfg.getint('cache', 'size'))
         if store: midware.Cache(store).setup(p)
 
     try:
