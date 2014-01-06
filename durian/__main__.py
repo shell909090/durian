@@ -26,30 +26,29 @@ options:
 
     cfg = utils.getcfg(optdict.get('-c', [
         'durian.conf', '~/.durian.conf', '/etc/durian/durian.conf']))
-    utils.initlog(cfg.get('log.loglevel', 'WARNING'), cfg.get('log.logfile'))
+    utils.initlog(cfg.get('log', 'loglevel') or 'WARNING', cfg.get('log', 'logfile'))
     import http
-    http.connector.max_addr = int(cfg.get('pool.maxaddr', 10))
-    addr = (cfg.get('main.addr', ''), int(cfg.get('main.port') or 8080))
+    http.connector.max_addr = cfg.getint('pool', 'maxaddr') or 10
+    addr = (cfg.get('main', 'addr'), cfg.getint('main', 'port') or 8080)
 
     import proxy, manager
-    p = proxy.Proxy(accesslog=cfg.get('log.access'))
+    p = proxy.Proxy(accesslog=cfg.get('log', 'access'))
     p.application = manager.setup(p)
-    if cfg.get('log.verbose'):
+    if cfg.getboolean('log', 'verbose'):
         p.VERBOSE = True
 
     import midware
-    if cfg.get('auth.username'):
+    if cfg.has_section('auth'):
         auth = midware.Auth()
-        auth.add(cfg.get('auth.username'), cfg.get('auth.password'))
+        if cfg.has_option('auth', 'userfile'):
+            auth.loadfile(cfg.get('auth', 'userfile'))
+        elif cfg.has_option('auth', 'username'):
+            auth.add(cfg.get('auth', 'username'), cfg.get('auth', 'password'))
         auth.setup(p)
-    elif cfg.get('auth.userfile'):
-        auth = midware.Auth()
-        auth.loadfile(cfg.get('auth.userfile'))
-        auth.setup(p)
-    if cfg.get('cache.engine'):
+    if cfg.has_section('cache'):
         store = None
-        if cfg['cache.engine'] == 'memory':
-            store = midware.MemoryCache(cfg.get('cache.size', 100))
+        if cfg.get('cache', 'engine') == 'memory':
+            store = midware.MemoryCache(cfg.getint('cache', 'size') or 100)
         if store: midware.Cache(store).setup(p)
 
     try:
